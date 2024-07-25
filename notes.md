@@ -1,4 +1,4 @@
-Simple server-side analytics for Gin Gonic
+Simple server-side statistics for Gin Gonic
 
 Can save:
 [ ] Loading time per page and average, overall average

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"cmp"
 	"fmt"
+	"regexp"
 )
 
 type (
@@ -56,6 +57,8 @@ func New() *Statistics {
 }
 
 func (s *Statistics) Middleware() gin.HandlerFunc {
+	acceptLanguageRe := regexp.MustCompile(`([a-z]{2});`)
+
 	return func(c *gin.Context) {
 		start := time.Now()
 
@@ -81,7 +84,10 @@ func (s *Statistics) Middleware() gin.HandlerFunc {
 				Language: lang,
 			}
 
-			s.VisitorsLanguage[lang] = s.VisitorsLanguage[lang] + 1
+			for _, l := range acceptLanguageRe.FindAllStringSubmatch(lang, -1) {
+				s.VisitorsLanguage[l[1]] = s.VisitorsLanguage[l[1]] + 1
+			}
+
 		}
 
 		visitor := s.Visitors[visitorIP]
@@ -92,6 +98,8 @@ func (s *Statistics) Middleware() gin.HandlerFunc {
 		}
 
 		s.currentVisitID++
+
+		c.Set("VisitID", s.currentVisitID)
 
 		visit := &Visit{
 			ID: s.currentVisitID,
@@ -148,13 +156,7 @@ func (s *Statistics) VisitsCount() int {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	visits := 0
-
-	for _, p := range s.Pages {
-		visits += len(p.Visits)
-	}
-
-	return visits
+	return len(s.Visits)
 }
 
 func (s *Statistics) VisitorsCount() int {
