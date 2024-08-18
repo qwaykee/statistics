@@ -9,6 +9,7 @@ import (
 	"cmp"
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 type (
@@ -30,21 +31,32 @@ type (
 	Visitor struct {
 		IP string
 		Language string
+		DynamicVisits int
+		StaticVisits int
 		History []*Visit
 	}
 
 	Visit struct {
 		ID int
 		Date time.Time
+		Type PageType
 		LoadingTime time.Duration
 		TimeSpent time.Duration
 		CodeIssued int
+		ContentType string
 		Referer string
 		VisitedBy *Visitor
 		Page *Page
 	}
 
 	pagesSlice []*Page
+
+	PageType string
+)
+
+const (
+	Dynamic PageType = "route"
+	Static PageType = "static"
 )
 
 func New() *Statistics {
@@ -56,10 +68,35 @@ func New() *Statistics {
 	}
 }
 
+func containsAny(s string, substrings ...string) bool {
+	for _, substr := range substrings {
+		if strings.Contains(s, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAnySuffix(s string, suffixes ...string) bool {
+	for _, suffix := range suffixes {
+		if strings.HasSuffix(s, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Statistics) Middleware() gin.HandlerFunc {
 	acceptLanguageRe := regexp.MustCompile(`([a-z]{2});`)
 
 	return func(c *gin.Context) {
+		s.mutex.Lock()
+
+		s.currentVisitID++
+		c.Set("VisitID", s.currentVisitID)
+
+		s.mutex.Unlock()
+
 		start := time.Now()
 
 		c.Next()
@@ -94,18 +131,37 @@ func (s *Statistics) Middleware() gin.HandlerFunc {
 		page := s.Pages[pagePath]
 
 		if len(visitor.History) > 1 {
-			visitor.LastVisit().TimeSpent = time.Since(visitor.LastVisit().Date)
+			lastHTMLVisit := visitor.LastDynamicVisit()
+
+			lastHTMLVisit.TimeSpent = time.Since(lastHTMLVisit.Date)
 		}
 
-		s.currentVisitID++
+		// determine page type
+		contentType := c.Writer.Header().Get("Content-Type")
 
-		c.Set("VisitID", s.currentVisitID)
+		var pageType PageType
+
+		pT, exists := c.Get("PageType")
+
+		if pT2, ok := pT.(PageType); exists && ok {
+			pageType = pT2
+		} else if strings.Contains(contentType, "text/html") {
+			pageType = Dynamic
+		} else {
+			pageType = Static
+		}
+
+		if pageType == Dynamic { visitor.DynamicVisits += 1 }
+		if pageType == Static { visitor.StaticVisits += 1 }
+		
 
 		visit := &Visit{
 			ID: s.currentVisitID,
+			Type: pageType,
 			Date: time.Now(),
 			TimeSpent: 0,
 			Referer: c.GetHeader("Referer"),
+			ContentType: contentType,
 			CodeIssued: c.Writer.Status(),
 			LoadingTime: loadingTime,
 			VisitedBy: visitor,
@@ -115,7 +171,6 @@ func (s *Statistics) Middleware() gin.HandlerFunc {
 		page.Visits = append(page.Visits, visit)
 		visitor.History = append(visitor.History, visit)
 		s.Visits[s.currentVisitID] = visit
-
 	}
 }
 
@@ -173,7 +228,7 @@ func (s *Statistics) EstimatedCurrentVisitors() int {
 	estimatedCurrentVisitors := 0
 
 	for _, v := range s.Visitors {
-		if time.Since(v.LastVisit().Date) < v.AverageTimeSpent() {
+		if time.Since(v.LastDynamicVisit().Date) < v.AverageTimeSpent() {
 			estimatedCurrentVisitors++
 		}
 	}
@@ -181,7 +236,7 @@ func (s *Statistics) EstimatedCurrentVisitors() int {
 	return estimatedCurrentVisitors
 }
 
-func (s *Statistics) AverageVisitsPerVisitor() int {
+func (s *Statistics) AverageDynamicVisitsPerVisitor() int {
 	visitors := len(s.Visitors)
 	totalVisits := 0
 
@@ -240,25 +295,31 @@ func (p *Page) VisitorsCount() int {
 }
 
 func (p *Page) AverageTimeSpent() time.Duration {
-	visits := len(p.Visits)
+	i := 0
 	totalTimeSpent := time.Duration(0)
 
 	for _, v := range p.Visits {
-		totalTimeSpent += v.TimeSpent
+		if v.Type == "route" {
+			i++
+			totalTimeSpent += v.TimeSpent
+		}
 	}
 
-	return totalTimeSpent / time.Duration(visits)
+	return totalTimeSpent / time.Duration(i)
 }
 
 func (p *Page) AverageLoadingTime() time.Duration {
-	visits := len(p.Visits)
+	i := 0
 	totalLoadingTime := time.Duration(0)
 
 	for _, v := range p.Visits {
-		totalLoadingTime += v.LoadingTime
+		if v.Type == Dynamic {
+			i++
+			totalLoadingTime += v.LoadingTime
+		}
 	}
 
-	return totalLoadingTime / time.Duration(visits)
+	return totalLoadingTime / time.Duration(i)
 }
 
 func (p *Page) GetVisit(date time.Time) (*Visit, error) {
@@ -286,18 +347,33 @@ func (v *Visitor) VisitsCount() int {
 }
 
 func (v *Visitor) AverageTimeSpent() time.Duration {
-	visits := len(v.History)
+	i := 0
 	totalTimeSpent := time.Duration(0)
 
 	for _, vi := range v.History {
-		totalTimeSpent += vi.TimeSpent
+		if vi.Type == "route" {
+			i++
+			totalTimeSpent += vi.TimeSpent
+		}
 	}
 
-	return totalTimeSpent / time.Duration(visits)
+	return totalTimeSpent / time.Duration(i)
 }
 
 func (v *Visitor) LastVisit() *Visit {
 	return v.History[len(v.History)-1]
+}
+
+func (v *Visitor) LastDynamicVisit() *Visit {
+	last := len(v.History)-1
+	
+	for i := range v.History {
+		if v.History[last-i].Type == Dynamic {
+			return v.History[last-i]
+		}
+	}
+
+	return &Visit{}
 }
 
 func (v *Visitor) GetVisit(date time.Time) (*Visit, error) {
